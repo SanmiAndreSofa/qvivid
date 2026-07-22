@@ -1,0 +1,342 @@
+name: CRAN preflight
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cran-preflight-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-source:
+    name: R-release source tarball
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      R_KEEP_PKG_SOURCE: yes
+      R_COMPILE_AND_INSTALL_PACKAGES: always
+      NOT_CRAN: "false"
+      QVIVID_BUILD_GIF: "false"
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: release
+          use-public-rspm: true
+
+      - uses: r-lib/actions/setup-pandoc@v2
+
+      - name: Install package and build dependencies
+        uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          extra-packages: any::rcmdcheck
+          needs: check
+
+      - name: Build the CRAN source tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_dir="$RUNNER_TEMP/qvivid-build"
+          stage_dir="$RUNNER_TEMP/qvivid-source"
+          mkdir -p "$build_dir" "$stage_dir"
+
+          cd "$build_dir"
+          R CMD build "$GITHUB_WORKSPACE"
+
+          mapfile -t tarballs < <(
+            find "$build_dir" -maxdepth 1 -type f -name 'qvivid_*.tar.gz' -print
+          )
+          if [[ "${#tarballs[@]}" -ne 1 ]]; then
+            echo "Expected exactly one qvivid source tarball; found ${#tarballs[@]}." >&2
+            printf '%s\n' "${tarballs[@]:-}" >&2
+            exit 1
+          fi
+
+          tarball="${tarballs[0]}"
+          cp "$tarball" "$stage_dir/"
+          cd "$stage_dir"
+          tarball_name="$(basename "$tarball")"
+          sha256sum "$tarball_name" > "$tarball_name.sha256"
+
+      - name: Upload the R-release source tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: qvivid-source-${{ github.sha }}
+          path: ${{ runner.temp }}/qvivid-source/
+          if-no-files-found: error
+          retention-days: 30
+
+  cran-preflight:
+    name: R-devel exact-tarball preflight
+    needs: build-source
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      R_KEEP_PKG_SOURCE: yes
+      R_COMPILE_AND_INSTALL_PACKAGES: always
+      NOT_CRAN: "false"
+      _R_CHECK_FORCE_SUGGESTS_: "true"
+      QVIVID_BUILD_GIF: "false"
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download the R-release source tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: qvivid-source-${{ github.sha }}
+          path: ${{ runner.temp }}/qvivid-source
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: devel
+          use-public-rspm: true
+
+      - uses: r-lib/actions/setup-pandoc@v2
+
+      - uses: r-lib/actions/setup-tinytex@v2
+
+      - name: Install TeX index tool
+        shell: bash
+        run: |
+          set -euo pipefail
+          tlmgr update --self
+          tlmgr install makeindex
+
+      - name: Install HTML validation tool
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get install --yes tidy
+
+      - name: Install package and check dependencies
+        uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          extra-packages: any::rcmdcheck
+          needs: check
+
+      - name: Verify the exact R-release source tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/qvivid-source"
+          mkdir -p "$GITHUB_WORKSPACE/_cran_artifacts"
+
+          mapfile -t tarballs < <(
+            find "$source_dir" -maxdepth 1 -type f -name 'qvivid_*.tar.gz' -print
+          )
+          mapfile -t checksums < <(
+            find "$source_dir" -maxdepth 1 -type f \
+              -name 'qvivid_*.tar.gz.sha256' -print
+          )
+          if [[ "${#tarballs[@]}" -ne 1 ]]; then
+            echo "Expected exactly one qvivid source tarball; found ${#tarballs[@]}." >&2
+            printf '%s\n' "${tarballs[@]:-}" >&2
+            exit 1
+          fi
+          if [[ "${#checksums[@]}" -ne 1 ]]; then
+            echo "Expected exactly one source-tarball checksum; found ${#checksums[@]}." >&2
+            printf '%s\n' "${checksums[@]:-}" >&2
+            exit 1
+          fi
+
+          tarball="${tarballs[0]}"
+          cd "$source_dir"
+          sha256sum --check "${checksums[0]}"
+          cp "$tarball" "$GITHUB_WORKSPACE/_cran_artifacts/"
+          cp "${checksums[0]}" "$GITHUB_WORKSPACE/_cran_artifacts/"
+          echo "QVV_TARBALL=$tarball" >> "$GITHUB_ENV"
+
+      - name: Build the PDF reference manual
+        shell: bash
+        run: |
+          set -euo pipefail
+          manual_src="$RUNNER_TEMP/qvivid-manual-src"
+          mkdir -p \
+            "$manual_src" \
+            "$RUNNER_TEMP/qvivid-manual" \
+            "$GITHUB_WORKSPACE/_cran_artifacts"
+          tar -xzf "$QVV_TARBALL" -C "$manual_src"
+          R CMD Rd2pdf \
+            --no-preview \
+            --output="$RUNNER_TEMP/qvivid-manual/qvivid-manual.pdf" \
+            "$manual_src/qvivid"
+          cp "$RUNNER_TEMP/qvivid-manual/qvivid-manual.pdf" \
+            "$GITHUB_WORKSPACE/_cran_artifacts/qvivid-manual.pdf"
+
+      - name: Check that exact tarball as CRAN
+        env:
+          _R_CHECK_CRAN_INCOMING_: "false"
+          _R_CHECK_CRAN_INCOMING_REMOTE_: "false"
+        shell: bash
+        run: |
+          set -uo pipefail
+          check_dir="$RUNNER_TEMP/qvivid-check"
+          mkdir -p "$check_dir"
+          cd "$check_dir"
+
+          set +e
+          R CMD check --as-cran "$QVV_TARBALL" 2>&1 | \
+            tee "$GITHUB_WORKSPACE/_cran_artifacts/R-CMD-check-as-cran.log"
+          check_exit="${PIPESTATUS[0]}"
+          set -e
+
+          echo "QVV_CHECK_EXIT=$check_exit" >> "$GITHUB_ENV"
+          # The following step owns the strict status decision so artifacts are
+          # still collected when R CMD check reports a problem.
+          exit 0
+
+      - name: Require 0 errors, 0 warnings, and 0 notes
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          check_log="$RUNNER_TEMP/qvivid-check/qvivid.Rcheck/00check.log"
+
+          if [[ ! -f "$check_log" ]]; then
+            echo "R CMD check did not produce qvivid.Rcheck/00check.log." >&2
+            exit 1
+          fi
+
+          cp "$check_log" "$GITHUB_WORKSPACE/_cran_artifacts/00check.log"
+          mapfile -t statuses < <(grep '^Status:' "$check_log" | tr -d '\r')
+
+          if [[ "${QVV_CHECK_EXIT:-missing}" != "0" ]]; then
+            echo "R CMD check exited with status ${QVV_CHECK_EXIT:-missing}." >&2
+            cat "$check_log"
+            exit 1
+          fi
+
+          if [[ "${#statuses[@]}" -ne 1 || "${statuses[0]:-}" != "Status: OK" ]]; then
+            echo "CRAN preflight requires the single final status 'Status: OK'." >&2
+            printf 'Observed status lines: %s\n' "${statuses[*]:-(none)}" >&2
+            cat "$check_log"
+            exit 1
+          fi
+
+          cat "$check_log"
+
+      - name: Check CRAN incoming feasibility
+        env:
+          _R_CHECK_CRAN_INCOMING_: "true"
+          _R_CHECK_CRAN_INCOMING_REMOTE_: "true"
+        shell: bash
+        run: |
+          set -uo pipefail
+          incoming_dir="$RUNNER_TEMP/qvivid-incoming"
+          mkdir -p "$incoming_dir"
+          cd "$incoming_dir"
+
+          set +e
+          R CMD check \
+            --as-cran \
+            --no-manual \
+            --no-examples \
+            --no-tests \
+            --ignore-vignettes \
+            "$QVV_TARBALL" 2>&1 | \
+            tee "$GITHUB_WORKSPACE/_cran_artifacts/R-CMD-check-incoming.log"
+          incoming_exit="${PIPESTATUS[0]}"
+          set -e
+
+          echo "QVV_INCOMING_EXIT=$incoming_exit" >> "$GITHUB_ENV"
+          exit 0
+
+      - name: Permit only the expected first-submission note
+        shell: bash
+        run: |
+          set -euo pipefail
+          check_log="$RUNNER_TEMP/qvivid-incoming/qvivid.Rcheck/00check.log"
+
+          if [[ ! -f "$check_log" ]]; then
+            echo "The incoming check did not produce qvivid.Rcheck/00check.log." >&2
+            exit 1
+          fi
+
+          cp "$check_log" "$GITHUB_WORKSPACE/_cran_artifacts/incoming-00check.log"
+          mapfile -t statuses < <(grep '^Status:' "$check_log" | tr -d '\r')
+          mapfile -t note_checks < <(
+            grep -E '^\* checking .* \.\.\.( \[[^]]+\])? NOTE\r?$' "$check_log" |
+              tr -d '\r' |
+              sed -E 's/ \[[^]]+\]( NOTE)$/\1/'
+          )
+
+          if [[ "${QVV_INCOMING_EXIT:-missing}" != "0" ]]; then
+            echo "The incoming check exited with status ${QVV_INCOMING_EXIT:-missing}." >&2
+            cat "$check_log"
+            exit 1
+          fi
+
+          if [[ "${#statuses[@]}" -ne 1 || "${statuses[0]:-}" != "Status: 1 NOTE" ]]; then
+            echo "Expected exactly one incoming NOTE for a first submission." >&2
+            printf 'Observed status lines: %s\n' "${statuses[*]:-(none)}" >&2
+            cat "$check_log"
+            exit 1
+          fi
+
+          expected_heading='* checking CRAN incoming feasibility ... NOTE'
+          if [[ "${#note_checks[@]}" -ne 1 || "${note_checks[0]:-}" != "$expected_heading" ]]; then
+            echo "An unexpected NOTE was reported." >&2
+            printf 'Observed NOTE checks: %s\n' "${note_checks[*]:-(none)}" >&2
+            cat "$check_log"
+            exit 1
+          fi
+
+          Rscript --vanilla - "$check_log" <<'RS'
+          args <- commandArgs(trailingOnly = TRUE)
+          lines <- readLines(args[[1L]], warn = FALSE, encoding = "UTF-8")
+          heading <- "^\\* checking CRAN incoming feasibility \\.\\.\\.( \\[[^]]+\\])? NOTE$"
+          starts <- grep(heading, lines)
+          if (length(starts) != 1L) {
+            stop("Expected one CRAN incoming NOTE block.", call. = FALSE)
+          }
+
+          start <- starts[[1L]]
+          following <- which(seq_along(lines) > start & grepl("^\\* checking ", lines))
+          finish <- if (length(following)) following[[1L]] - 1L else length(lines)
+          block <- lines[start:finish]
+          block[[1L]] <- sub(" \\[[^]]+\\] NOTE$", " NOTE", block[[1L]])
+          while (length(block) && !nzchar(block[[length(block)]])) {
+            block <- block[-length(block)]
+          }
+
+          maintainer <- "Sanmi (Oluwasanmi) Adenaiye <dradenaiyesanmi@gmail.com>"
+          expected_ascii <- c(
+            "* checking CRAN incoming feasibility ... NOTE",
+            sprintf("Maintainer: '%s'", maintainer),
+            "",
+            "New submission"
+          )
+          expected_fancy <- c(
+            "* checking CRAN incoming feasibility ... NOTE",
+            sprintf("Maintainer: \u2018%s\u2019", maintainer),
+            "",
+            "New submission"
+          )
+
+          if (!identical(block, expected_ascii) && !identical(block, expected_fancy)) {
+            writeLines("The incoming NOTE contains information beyond 'New submission'.", stderr())
+            writeLines(block, stderr())
+            quit(status = 1L)
+          }
+          RS
+
+          cat "$check_log"
+
+      - name: Upload CRAN preflight artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qvivid-cran-preflight-${{ github.sha }}
+          path: _cran_artifacts/
+          if-no-files-found: warn
+          retention-days: 30

@@ -1,0 +1,243 @@
+---
+title: "Getting Started with qvivid"
+author: "Sanmi (Oluwasanmi) Adenaiye"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Getting Started with qvivid}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7,
+  fig.height = 4.5,
+  dpi = 96
+)
+
+build_gif <- requireNamespace("gifski", quietly = TRUE) &&
+  identical(tolower(Sys.getenv("QVIVID_BUILD_GIF")), "true")
+```
+
+`qvivid` provides circuit construction, exact statevector simulation, terminal
+measurement sampling, tidy inspection, and publication-oriented graphics in
+one R workflow. The simulation core does not require Python. This vignette
+introduces the workflow with a Bell state and documents the data structures
+that remain stable in qvivid 0.1.x.
+
+```{r attach}
+library(qvivid)
+```
+
+## Build and simulate a Bell circuit
+
+Gate functions take a circuit as their first argument, so they work naturally
+with R's base pipe. Qubit indices start at one.
+
+```{r bell-circuit}
+bell <- quantum_circuit(2, name = "Bell state") |>
+  gate_h(1) |>
+  gate_cx(control = 1, target = 2) |>
+  measure_all()
+
+bell
+```
+
+`simulate_quantum()` always computes the exact final state. Set `shots` to
+also sample terminal measurements, `seed` to make those samples reproducible,
+and `record = TRUE` to retain the state after every operation.
+
+```{r bell-simulation}
+result <- simulate_quantum(
+  bell,
+  shots = 256,
+  seed = 2026,
+  record = TRUE
+)
+
+result
+result$counts
+```
+
+Measurement in qvivid 0.1.x is terminal: it samples the final state but does
+not perform mid-circuit collapse, reset, or conditional execution. If a
+circuit has no explicit measurement operation, shot sampling uses the default
+mapping from each available qubit to the matching classical bit.
+
+Statevector memory grows exponentially with the number of qubits. Recorded
+trajectories retain an additional state for every unitary operation; terminal
+measurement frames reuse the preceding state. Before allocating the state,
+qvivid estimates peak memory and compares it with
+`memory_limit_gib` (2 GiB by default, configurable with the
+`qvivid.memory_limit_gib` option). Raise that guard only after confirming that
+the machine has enough memory; use `record = FALSE` for large circuits.
+
+## Qubit and basis ordering
+
+The R API uses one-based qubits. In the statevector, qubit 1 is the
+least-significant bit (LSB). Displayed basis strings are written from the
+highest qubit down to qubit 1. Consequently, applying X to qubit 1 in a
+two-qubit register populates `|01>`, not `|10>`.
+
+```{r lsb-order}
+lsb_result <- quantum_circuit(2, name = "LSB example") |>
+  gate_x(1) |>
+  simulate_quantum()
+
+state_data(lsb_result, include_zero = FALSE)
+```
+
+For two-qubit custom unitaries, the first qubit supplied to `gate_unitary()`
+is the most-significant qubit in the matrix's local basis order
+`|00>, |01>, |10>, |11>`.
+
+## Inspect states, counts, and trajectories
+
+Use `state_data()` instead of reconstructing labels or phases from the raw
+statevector. Its stable 0.1.x columns are:
+
+| Column | Meaning |
+|---|---|
+| `index` | Zero-based integer statevector index |
+| `basis` | High-to-low binary basis label, ending in qubit 1 |
+| `real`, `imaginary` | Cartesian components of the amplitude |
+| `magnitude` | Absolute value of the amplitude |
+| `probability` | Squared magnitude |
+| `phase` | Complex phase in radians; `NA` for a numerically zero amplitude |
+
+```{r state-schema}
+state_data(result, include_zero = FALSE)
+```
+
+`result$counts` is always a data frame with `basis`, `count`, and
+`probability` columns. It has zero rows when `shots = NULL`. Count labels are
+classical-bit strings ordered from the highest classical bit down to bit 1;
+the circuit's terminal measurement mapping determines which qubit supplies
+each bit.
+
+When `record = TRUE`, `trajectory_data()` returns the state-data columns above
+plus `step` and `label`. Step 0 is the initial state, and each subsequent step
+corresponds to one circuit operation.
+
+```{r trajectory-schema}
+trajectory <- trajectory_data(result, include_zero = FALSE)
+trajectory[, c("step", "label", "basis", "probability")]
+
+trajectory_bloch(result, qubit = 1)
+```
+
+## Stable data structures in qvivid 0.1.x
+
+A `qv_result` is a named list with class `qv_result`. The following named
+fields and their meanings are stable through the 0.1.x series:
+
+| Field | Meaning |
+|---|---|
+| `circuit` | The simulated `qv_circuit` |
+| `state` | Normalized complex vector of length `2^n` in LSB order |
+| `probabilities` | Numeric vector aligned with `state` |
+| `counts` | The three-column terminal-shot table described above |
+| `shots`, `seed` | Requested values, or `NULL` when omitted |
+| `backend` | Backend actually used: `"native"` or `"reference"` |
+| `elapsed` | Simulation elapsed time in seconds |
+| `trajectory` | Recorded frames, or `NULL` when `record = FALSE` |
+| `schema_version` | Integer version of the result schema; currently `1L` |
+
+A `qv_circuit` has stable `name`, `n_qubits`, `n_clbits`, `operations`, and
+`schema_version` fields. Each operation has stable `type`, `name`, `label`,
+`qubits`, `clbits`, `matrix`, and `parameters` fields. Use constructors and
+gate functions to create or modify circuits; treat these named fields as
+read-only interoperability data.
+
+Each raw `result$trajectory` frame has stable `step`, `label`, `operation`, and
+`state` fields. Prefer `trajectory_data()` for tabular analysis. Its stable
+columns are the seven `state_data()` columns followed by `step` and `label`.
+`trajectory_bloch()` returns stable `step`, `label`, `qubit`, `n_qubits`, `x`,
+`y`, `z`, `radius`, and `purity` columns.
+
+Minor 0.1.x releases may append named fields, columns, optional arguments, or
+new exported functions. They will not remove or rename the fields and columns
+listed above, change their meaning, or reorder existing tabular columns. Code
+should select fields and columns by name rather than depend on list position.
+
+## Plot and export
+
+`plot()` dispatches a circuit to `plot_circuit()` and a result to
+`plot_state()`. Explicit plotting functions expose the same visual presets:
+`"nature"`, `"npj"`, `"colorblind"`, `"dark"`, `"light"`, and `"mono"`.
+Plot behavior does not change with installed packages: `plot_state()` uses
+base graphics by default and returns the plotted state data invisibly.
+`engine = "auto"` is a compatibility alias for base graphics. An explicit
+`engine = "ggplot2"` requires the suggested `ggplot2` package and returns a
+ggplot object for printing or composition. `plot_circuit()` returns its circuit
+invisibly, and `plot_execution()` returns its result invisibly.
+
+```{r state-plot, fig.cap="Exact Bell-state probabilities and phases."}
+plot(result, theme = "npj", engine = "base")
+```
+
+Recorded runs can synchronize the circuit playhead and exact state at any
+execution step.
+
+```{r execution-plot, fig.height=5.3, fig.cap="Circuit and exact state after the controlled-X gate."}
+plot_execution(result, step = 2, theme = "nature")
+```
+
+`save_quantum_plot()` supports PDF, SVG, PNG, and TIFF. Always provide a path
+you control; package examples and vignettes should write only to R's temporary
+directory.
+
+```{r export}
+figure_file <- tempfile(fileext = ".pdf")
+artifact <- save_quantum_plot(
+  result,
+  figure_file,
+  view = "execution",
+  step = 2,
+  size = "single",
+  theme = "nature"
+)
+
+file.exists(artifact$path)
+unlink(artifact$path)
+```
+
+## Optional GIF animation
+
+GIF export requires the suggested `gifski` package. The following chunk is
+evaluated only when `gifski` is installed **and** the environment variable
+`QVIVID_BUILD_GIF=true` is set. It is skipped during ordinary package and CRAN
+vignette builds, and its output is confined to `tempdir()`.
+
+```{r optional-gif, eval=build_gif}
+gif_file <- tempfile(fileext = ".gif")
+animation <- animate_state(
+  result,
+  gif_file,
+  fps = 2,
+  width = 640,
+  height = 480,
+  theme = "npj",
+  progress = FALSE
+)
+
+animation
+unlink(animation$path)
+```
+
+## Compatibility and deprecation policy
+
+The exported functions, required arguments, S3 classes, and data structures
+documented above will remain compatible throughout qvivid 0.1.x. New optional
+arguments, functions, fields, and columns may be added. If an interface must
+be replaced, qvivid will issue a warning for at least one 0.1.x release and
+keep the old interface available throughout the series. Removal can occur no
+earlier than 0.2.0. A serious correctness or security defect may require an
+earlier change; such changes will be recorded in `NEWS.md`.
+
+Unexported names (including names beginning with `.qv_`), exact timing values,
+warning text, and pixel-level plot geometry are implementation details. Plot
+engine and return-value semantics, theme names, basis ordering, and data
+meanings remain documented public behavior.

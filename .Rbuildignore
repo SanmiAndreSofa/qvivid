@@ -1,0 +1,12 @@
+^\.git$
+^\.gitattributes$
+^\.github$
+^\.r-lib$
+^docs$
+^tools$
+^README\.md$
+^LICENSE\.md$
+^cran-comments\.md$
+^_cran_artifacts$
+^qvivid_.*\.tar\.gz$
+^qvivid\.Rcheck$
