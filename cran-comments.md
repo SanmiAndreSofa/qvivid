@@ -1,22 +1,18 @@
 ## Test environments
 
 * GitHub Actions, Ubuntu 24.04.4 LTS, R Under development (unstable)
-  (2026-06-21 r90185):
-  https://github.com/SanmiAndreSofa/qvivid/actions/runs/29917820428
-* GitHub Actions, Ubuntu 24.04.4 LTS, R 4.6.1 (2026-06-24):
-  https://github.com/SanmiAndreSofa/qvivid/actions/runs/29917820391
+  (2026-06-21 r90185)
+* GitHub Actions, Ubuntu 24.04.4 LTS, R 4.6.1 (2026-06-24)
 * GitHub Actions, Microsoft Windows Server 2025,
-  R 4.6.1 (2026-06-24 ucrt):
-  https://github.com/SanmiAndreSofa/qvivid/actions/runs/29917820391
-* GitHub Actions, macOS 26.4 (arm64), R 4.6.1 (2026-06-24):
-  https://github.com/SanmiAndreSofa/qvivid/actions/runs/29917820391
-* GitHub Actions, Ubuntu 22.04.5 LTS, R 4.2.3 (2023-03-15):
-  https://github.com/SanmiAndreSofa/qvivid/actions/runs/29917820391
+  R 4.6.1 (2026-06-24 ucrt)
+* GitHub Actions, macOS 26.4 (arm64), R 4.6.1 (2026-06-24)
+* GitHub Actions, Ubuntu 22.04.5 LTS, R 4.2.3 (2023-03-15)
 
 ## R CMD check results
 
-The exact `qvivid_0.1.0.tar.gz` source tarball built with R-devel completed
-the full technical `R CMD check --as-cran` with:
+The `qvivid_0.1.0.tar.gz` source tarball was built with the current R
+release. That exact tarball completed the full technical
+`R CMD check --as-cran` with R-devel with:
 
 0 errors | 0 warnings | 0 notes
 
